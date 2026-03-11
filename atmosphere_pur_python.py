@@ -106,12 +106,12 @@ class StandardAtm:
         :param h: Geopotential altitude in meter
         :return: N2O mol fraction
         """
-        """
-        C0 = 0.01  # ground concentration of CO2
-        H = 2.5e3
+
+        C0 = 0.004  # ground concentration of H20
+        H = 2.0e3
         return(C0 * math.exp(- h / H))
-        """
-        return(0.01)
+
+        #return(0.01)
 
 
     def getAtmProperties(self, z):

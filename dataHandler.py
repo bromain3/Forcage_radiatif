@@ -232,7 +232,7 @@ if __name__ == '__main__':
         print(l.local_iso_id)
     CO2_iso_1.plotData('log')
     plt.show()
-    #a.download('H2O', 200, 1600)
+    a.download('CH4', 200, 1600)
     H2O = a.readData('H2O')
     H2O_iso_1 = H2O.getIsotopologueByID(1)
     for l in H2O_iso_1:

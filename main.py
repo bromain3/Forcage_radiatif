@@ -62,8 +62,8 @@ Z_MAX  = 15_000.0  # altitude maximale        [m]
 # Pour ajouter une espèce : décommenter/modifier le profil dans atm,
 # ajouter la clé dans speciesConcentration, et télécharger le .par HITRAN.
 
-SPECIES = ['CO2']
-#SPECIES = ['CO2', 'H2O']          # ajouter H2O (effet dominant dans l'IR)
+#SPECIES = ['CO2']
+SPECIES = ['CO2', 'H2O']          # ajouter H2O (effet dominant dans l'IR)
 #SPECIES = ['CO2', 'H2O', 'CH4', 'N2O']  # simulation complète
 
 # --- Sortie ---
