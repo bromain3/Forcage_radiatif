@@ -1,239 +1,261 @@
-import requests  # in C, an equivalent in libcurl
-import matplotlib.pyplot as plt  # used to plot data. Plotting data can be a bit harder in C and should be replaced by saving data at first
+import requests
+import torch
 import data.corespondance_Moecule_ID as corr
-import numpy as np
-import scipy.signal as signal
-
 
 kb = 1.380_649e-23
-c = 299_792_458
+c  = 299_792_458
 Na = 6.02214129e23
+
+
 class HITRANStructure:
     """
-    Class storing one line of data provided by the HITRAN API
+    Stores one line of data from the HITRAN API.
+    Unchanged from the original — pure Python data container.
     """
-    def __init__(self, molecule_id, local_iso_id, nu, sw, a, gamma_air, gamma_self, elower, n_air, delta_air, global_upper_quanta, global_lower_quanta, local_upper_quanta, local_lower_quanta, ierr, iref, line_mixing_flag, gp, gpp):
-        """
-        Constructor of the class. Each input corresponds to one line of data provided by the HITRAN API and is stored in the corresponding instance variable
-        :param Download HITRAN data from the website and look at the README for more insight on the input data
-        """
-        self.molecule_id = molecule_id
-        self.local_iso_id = local_iso_id
-        self.nu = nu
-        self.sw = sw
-        self.a = a
-        self.gamma_air = gamma_air
-        self.gamma_self = gamma_self
-        self.elower = elower
-        self.n_air = n_air
-        self.delta_air = delta_air
-        self.global_upper_quanta = global_upper_quanta
-        self.global_lower_quanta = global_lower_quanta
-        self.local_upper_quanta = local_upper_quanta
-        self.local_lower_quanta = local_lower_quanta
-        self.ierr = ierr
-        self.iref = iref
-        self.line_mixing_flag = line_mixing_flag
-        self.gp = gp
-        self.gpp = gpp
+    def __init__(self, molecule_id, local_iso_id, nu, sw, a, gamma_air, gamma_self,
+                 elower, n_air, delta_air, global_upper_quanta, global_lower_quanta,
+                 local_upper_quanta, local_lower_quanta, ierr, iref,
+                 line_mixing_flag, gp, gpp):
+        self.molecule_id          = molecule_id
+        self.local_iso_id         = local_iso_id
+        self.nu                   = nu
+        self.sw                   = sw
+        self.a                    = a
+        self.gamma_air            = gamma_air
+        self.gamma_self           = gamma_self
+        self.elower               = elower
+        self.n_air                = n_air
+        self.delta_air            = delta_air
+        self.global_upper_quanta  = global_upper_quanta
+        self.global_lower_quanta  = global_lower_quanta
+        self.local_upper_quanta   = local_upper_quanta
+        self.local_lower_quanta   = local_lower_quanta
+        self.ierr                 = ierr
+        self.iref                 = iref
+        self.line_mixing_flag     = line_mixing_flag
+        self.gp                   = gp
+        self.gpp                  = gpp
 
     def __str__(self):
-        """
-        Overload of the str function. It is used to print instance variables of the class to be sure everything was stored as it should be.
-        You cannot overload functions in pur C as it is not object-oriented (you can in C++ but it can be hard). However in C, reading delimited data like
-        this is way easier, so verifying the output is not mandatory
-        :return: string object representing the class
-        """
-        #  initialisation of the result string
         res = ''
-        for i in self.__dict__.keys():  # looping over every instance variable stored in __dict__.keys()
-            res += i + ' = ' + str(self.__dict__[i]) + '\n'
-        return(res)
+        for k in self.__dict__.keys():
+            res += k + ' = ' + str(self.__dict__[k]) + '\n'
+        return res
+
 
 class HITRANData(list):
-    #TODO: en vrai sw dépende de la tempéraature et de la pression. il serait interessant de le prendre en compte
     """
-    High level class for handling HITRAN data. It inherits form list object. It actualy is a list of HITRANStructure objects
+    High-level class for handling HITRAN data (list of HITRANStructure).
+
+    After calling to_torch(), spectroscopic arrays are stored as torch tensors
+    on the chosen device/dtype so that getTau() never touches CPU when on GPU.
     """
+
     def __init__(self, specie, isIsotpologueData=False):
-        """
-        Constructor of the class HITRANData
-        :param specie (str): Name of the specie represented by HITRANData object. It is mainly used for labeling graphs
-        :param isIsotpologueData (bool): Flag to know if HITRANData contains multiple isotopologues or not. It should be understood that it IS NOT
-            the result of a data analysis but it is just declared at class initialisation
-        """
         list.__init__(self)
         self.isIsotpologueData = isIsotpologueData
-        self.specie = specie
+        self.specie            = specie
+
+        # torch tensors — populated by to_torch()
+        self._gamma_air  = None
+        self._gamma_self = None
+        self._n_air      = None
+        self._delta_air  = None
+        self._nui        = None
+        self._Sw         = None
+
+    # ------------------------------------------------------------------
+    # Filtering helpers (unchanged API)
+    # ------------------------------------------------------------------
 
     def getIsotopologueByID(self, id):
-        """
-        Extracts data from an isotopologue given its local HITRAN id
-        :param id (int): Local HITRAN id
-        :return (HITRANData): Isotopologue data
-        """
         res = HITRANData(self.specie, isIsotpologueData=True)
         for line in self:
             if line.local_iso_id == id:
                 res.append(line)
-        return(res)
+        return res
 
     def getData(self, data):
+        return [getattr(line, data) for line in self]
+
+    # ------------------------------------------------------------------
+    # Torch conversion
+    # ------------------------------------------------------------------
+
+    def to_torch(self, device=None, dtype=None):
         """
-        Extract a given column from the data
-        :param data (str): Name of the data to extract, as given in HITRAN headers
-        :return (list): List of the values ordered as in the file containing data
+        Convert spectroscopic arrays to torch tensors and move them to
+        *device* with *dtype*.  Must be called before getTau().
+
+        Parameters
+        ----------
+        device : torch.device or str, optional  (default: cpu)
+        dtype  : torch.dtype, optional          (default: torch.float64)
+
+        Returns
+        -------
+        self  (for chaining)
         """
-        dat = []
-        for line in self:
-            dat.append(getattr(line, data))
-        return(dat)
-
-
-    def getTau(self, nu, T, P, specieFraction):
-        """
-        Computes optical depth per cm given a list of frequencies at which to compute values
-        It can be computationaly optimized by reducing the number of large array operations
-
-        This function neglects variation of line intensity with T.
-        It only considers Lorentzian profile (pressure-broadening). For low pressure, a dopler-broadened (Gaussian) profile is more accurate
-
-        :param nu (np.array, one dimensional): List of wavenumber at which to compute values (cm-1)
-        :param T (float): Temperature (K)
-        :param P (float): Pressure (atm)
-        :param specieFraction (float): Specie mol fraction
-        :return (float): Absorption coefficient
-        """
-
         if not self.isIsotpologueData:
-            raise ValueError('Impossible to compute absorption coefficient for all isotopologues at once in this version')
+            raise ValueError('to_torch() can only be called on a single-isotopologue HITRANData.')
 
+        device = device if device is not None else torch.device('cpu')
+        dtype  = dtype  if dtype  is not None else torch.float64
 
-        T0 = 296  # reference temperature
-        P0 = 1.0  # reference pressure
+        def _t(lst):
+            return torch.tensor(lst, dtype=dtype, device=device)
 
-        gamma_air = np.array(self.getData('gamma_air'))
-        gamma_self = np.array(self.getData('gamma_self'))
-        n_air = np.array(self.getData('n_air'))
-        delta = np.array(self.getData('delta_air'))
-        nui = np.array(self.getData('nu'))
-        Sw = np.array(self.getData('sw'))
+        self._gamma_air  = _t(self.getData('gamma_air'))
+        self._gamma_self = _t(self.getData('gamma_self'))
+        self._n_air      = _t(self.getData('n_air'))
+        self._delta_air  = _t(self.getData('delta_air'))
+        self._nui        = _t(self.getData('nu'))
+        self._Sw         = _t(self.getData('sw'))
 
-        # limitaiton : constant line intensity with T
-        n = n_air # or 0.5
-        gamma = (T0 / T) ** n * (gamma_air * P * (1 - specieFraction) + gamma_self * P * specieFraction)
+        self._device = device
+        self._dtype  = dtype
+        return self
 
-        fL = 1 / np.pi * gamma / (gamma ** 2 + (nu[:, np.newaxis] - (nui + delta * P)) ** 2)
+    # ------------------------------------------------------------------
+    # getTau — fully vectorised, no Python loops
+    # ------------------------------------------------------------------
 
-        #alphaD = nui / c * np.sqrt(2 * Na * kb * T * np.log(2) / molarMass)
+    def getTau(self, nu: torch.Tensor, T: float, P: float, specieFraction: float) -> torch.Tensor:
+        """
+        Computes optical depth per cm for a batch of wavenumbers.
 
-        #fG = np.sqrt(np.log(2) / np.pi / alphaD ** 2) * np.exp(- (nu[:, np.newaxis] - nui) ** 2 * np.log(2) / (alphaD ** 2))
+        All operations are performed on the tensor device — no CPU↔GPU
+        transfers occur when to_torch() was called with a GPU device.
 
+        Parameters
+        ----------
+        nu             : torch.Tensor, shape (N,)  [cm-1]   — already on device
+        T              : float  [K]
+        P              : float  [atm]
+        specieFraction : float  mol fraction of the species
 
-        t = np.sum(Sw * fL, axis=1) * (101325 * P / kb / T) * (1e-2) ** 3 * specieFraction
-        #t = np.sum(Sw * f, axis=1)
+        Returns
+        -------
+        tau : torch.Tensor, shape (N,)  [cm-1]
+        """
+        if self._nui is None:
+            raise RuntimeError('Call to_torch() before getTau().')
 
-        return(t)
+        T0 = 296.0   # reference temperature [K]
 
+        # --- Lorentzian half-width (n_lines,) ---
+        gamma = ((T0 / T) ** self._n_air
+                 * (self._gamma_air  * P * (1.0 - specieFraction)
+                    + self._gamma_self * P * specieFraction))            # (n_lines,)
+
+        # --- Shifted line centres (n_lines,) ---
+        nu_shifted = self._nui + self._delta_air * P                     # (n_lines,)
+
+        # --- Lorentzian profile  (N_nu, n_lines) — broadcast ---
+        # nu          : (N, 1)
+        # nu_shifted  : (1, n_lines)   via unsqueeze
+        delta_nu = nu.unsqueeze(1) - nu_shifted.unsqueeze(0)            # (N, n_lines)
+        fL = (1.0 / torch.pi) * gamma / (gamma ** 2 + delta_nu ** 2)   # (N, n_lines)
+
+        # --- Number density factor ---
+        # n [molecules/cm3] = P_pa / (kb * T)  ×  (1e-2)^3
+        P_pa  = P * 101_325.0
+        n_mol = (P_pa / (kb * T)) * (1e-2) ** 3                         # scalar
+
+        # --- Sum over lines ---
+        tau = (fL @ self._Sw) * n_mol * specieFraction                  # (N,)
+
+        return tau
+
+    # ------------------------------------------------------------------
+    # Visualisation helper (unchanged API)
+    # ------------------------------------------------------------------
 
     def plotData(self, y='linear'):
-        """
-        Creates a graph object using matplotlib.pyplot.plot function (does not show it. you still need to use matplotlib.pyplot.show() afterwards)
-        :param y (str): Argument directly passed to matplotlib.pyplot.yscale. See matplotlib documentation for more insight. Two common values are 'linear' and 'log'
-        :return: None
-        """
+        import matplotlib.pyplot as plt
         if not self.isIsotpologueData:
-            raise ValueError('Impossible to plot data because it contains multiple isotopologues. It will be corrected in next versions of the code')
-        nu = []
-        Sw = []
-        for line in self:
-            nu.append(line.nu)
-            Sw.append(line.sw)
+            raise ValueError('Impossible to plot multi-isotopologue data.')
+        nu = self.getData('nu')
+        Sw = self.getData('sw')
         plt.plot(nu, Sw)
         plt.yscale(y)
         plt.title(f'Absorption coefficient of {self.specie}')
         plt.xlabel('Frequency [cm-1]')
-        plt.ylabel('Absorption coefficient, isotopologue abundance acounted for [cm-1 / (molecule * cm-2)]')
-
+        plt.ylabel('Absorption coefficient [cm-1 / (molecule * cm-2)]')
 
 
 class DataHandler:
     """
-    Handles all operations related to stored data: downloading and reading
+    Handles all operations related to stored data: downloading and reading.
+    Unchanged public API.
     """
 
     API_FORMAT = 'https://hitran.org/lbl/api?iso_ids_list={}&numin={}&numax={}'
 
     def download(self, specie, nu_min, nu_max):
-        """
-        Function used to download data from HITRAN via API. data stored in data folder and using the naming pattern 'bandes_{specie}.par'
-        :param specie (str): Name of the specie to download (all known isotopologs will be downloaded)
-            The specie name must be in convertion table ISO
-        :param nu_min (float): lower limit of frequency to download
-        :param nu_max (float): upper limit of frequency to download
-        :return: None
-        """
         ids = []
         for val in corr.ISO.values():
             if val[-1] == specie:
                 ids.append(val[0])
         if len(ids) == 0:
             raise ValueError(f'No data found for specie {specie}')
-        else:
-            iso_ids_list = ''
-            for id in ids:
-                iso_ids_list += str(id) + ','
-            iso_ids_list = iso_ids_list[:-1]  # remove last comma
-            data = requests.get(DataHandler.API_FORMAT.format(iso_ids_list, nu_min, nu_max)).text
-            with open(f'data/bandes_{specie}.par', 'w') as file:
-                file.write(data)
+        iso_ids_list = ','.join(str(i) for i in ids)
+        data = requests.get(DataHandler.API_FORMAT.format(iso_ids_list, nu_min, nu_max)).text
+        with open(f'data/bandes_{specie}.par', 'w') as file:
+            file.write(data)
 
     def readData(self, specie):
-        """
-        Function used to read data sotored in the data folder
-        :param specie (str): Name of the specie to read (all known isotopologues will be read)
-        :return (HITRANData): HITRANData object representing specie data
-        """
         res = HITRANData(specie)
-
         with open(f'data/bandes_{specie}.par', 'r') as file:
             data = file.readlines()
-
         for line in data:
             res.append(HITRANStructure(
-                molecule_id=int(line[0:2]),
-                local_iso_id=int(line[2:3]),
-                nu=float(line[3:15]),
-                sw=float(line[15:25]),
-                a=float(line[25:35]),
-                gamma_air=float(line[35:40]),
-                gamma_self=float(line[40:45]),
-                elower=float(line[45:55]),
-                n_air=float(line[55:59]),
-                delta_air=float(line[59:67]),
-                global_upper_quanta=line[67:82],
-                global_lower_quanta=line[82:97],
-                local_upper_quanta=line[97:112],
-                local_lower_quanta=line[112:127],
-                ierr=line[127:128],
-                iref=line[128:130],
-                line_mixing_flag=line[130:131],
-                gp=line[131:138],
-                gpp=line[138:145],
+                molecule_id           = int(line[0:2],  36),
+                local_iso_id          = int(line[2:3],  36),
+                nu                    = float(line[3:15]),
+                sw                    = float(line[15:25]),
+                a                     = float(line[25:35]),
+                gamma_air             = float(line[35:40]),
+                gamma_self            = float(line[40:45]),
+                elower                = float(line[45:55]),
+                n_air                 = float(line[55:59]),
+                delta_air             = float(line[59:67]),
+                global_upper_quanta   = line[67:82],
+                global_lower_quanta   = line[82:97],
+                local_upper_quanta    = line[97:112],
+                local_lower_quanta    = line[112:127],
+                ierr                  = line[127:128],
+                iref                  = line[128:130],
+                line_mixing_flag      = line[130:131],
+                gp                    = line[131:138],
+                gpp                   = line[138:145],
             ))
-        return(res)
+        return res
 
 
 if __name__ == '__main__':
+    import matplotlib.pyplot as plt
     a = DataHandler()
+
+    #a.download('CO2', 200, 1600)
+    #a.download('H2O', 200, 1600)
+    #a.download('CH4', 200, 1600)
+
     CO2 = a.readData('CO2')
     CO2_iso_1 = CO2.getIsotopologueByID(1)
     for l in CO2_iso_1:
         print(l.local_iso_id)
     CO2_iso_1.plotData('log')
     plt.show()
-    a.download('CH4', 200, 1600)
+
     H2O = a.readData('H2O')
+    H2O_iso_1 = H2O.getIsotopologueByID(1)
+    for l in H2O_iso_1:
+        print(l.local_iso_id)
+    H2O_iso_1.plotData('log')
+    plt.show()
+
+    H2O = a.readData('CH4')
     H2O_iso_1 = H2O.getIsotopologueByID(1)
     for l in H2O_iso_1:
         print(l.local_iso_id)
